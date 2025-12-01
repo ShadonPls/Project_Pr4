@@ -21,167 +21,102 @@ namespace Server
         static void Main(string[] args)
         {
             Console.OutputEncoding = Encoding.UTF8;
-            InitializeDatabase();
-            Console.Write("Введите порт (по умолчанию 8888): ");
-            string sPort = Console.ReadLine();
-            if (string.IsNullOrEmpty(sPort))
-                sPort = "5000";
+            var ipAddress = GetServerIp();
+            var port = GetServerPort();
 
-            if (int.TryParse(sPort, out int port))
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Запуск сервера на порту {port}...");
-                Console.ResetColor();
-                StartServer(port);
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine("Неверный порт. Завершение работы.");
-                Console.ResetColor();
-                Console.ReadKey();
-            }
+            StartServer(ipAddress, port);
+
+            Console.ReadKey();
         }
 
-        private static void InitializeDatabase()
+        private static IPAddress GetServerIp()
         {
-            try
-            {
-                if (!dbContext.Users.Any())
-                {
-                    Console.WriteLine("Инициализация базы данных...");
+            Console.Write("Введите IP сервера: ");
 
-                    var user = new User
-                    {
-                        Login = "Horoshev",
-                        Password = "Asdfg123",
-                        Src = @"C:\FTP_Server"
-                    };
+            string input = Console.ReadLine();
 
-                    dbContext.Users.Add(user);
-                    dbContext.SaveChanges();
+            return IPAddress.Parse("127.0.0.1");
+        }
 
-                    // Создаем корневую директорию для пользователя
-                    if (!Directory.Exists(user.Src))
-                    {
-                        Directory.CreateDirectory(user.Src);
-                        Console.WriteLine($"Создана корневая директория: {user.Src}");
+        private static int GetServerPort()
+        {
+            Console.Write("Введите порт (по умолчанию 8888): ");
+            string input = Console.ReadLine();
 
-                        // Создаем тестовые файлы
-                        CreateTestFiles(user.Src);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка инициализации БД: {ex.Message}");
-            }
+            if (int.TryParse(input, out int port) && port > 0 && port < 65536)
+                return port;
+            return -1;
         }
 
         private static void CreateTestFiles(string directory)
         {
-            try
-            {
-                // Создаем несколько тестовых файлов
-                string[] testFiles = {
-                    "readme.txt",
-                    "test_document.docx",
-                    "image.jpg",
-                    "data.csv"
-                };
+            string[] testFiles = {
+                "readme.txt",
+                "test_document.docx",
+                "image.jpg",
+                "data.csv"
+            };
 
-                foreach (var fileName in testFiles)
-                {
-                    string filePath = Path.Combine(directory, fileName);
-                    if (!File.Exists(filePath))
-                    {
-                        File.WriteAllText(filePath, $"Тестовый файл: {fileName}\nСоздан: {DateTime.Now}");
-                        Console.WriteLine($"Создан тестовый файл: {fileName}");
-                    }
-                }
-            }
-            catch (Exception ex)
+            foreach (var fileName in testFiles)
             {
-                Console.WriteLine($"Ошибка создания тестовых файлов: {ex.Message}");
+                string filePath = Path.Combine(directory, fileName);
+                if (!File.Exists(filePath))
+                {
+                    File.WriteAllText(filePath, $"Тестовый файл: {fileName}\nСоздан: {DateTime.Now}");
+                }
             }
         }
 
-        static void StartServer(int port)
+        static void StartServer(IPAddress ipAddress, int port)
         {
-            IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, port);
-            Socket listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            var endPoint = new IPEndPoint(ipAddress, port);
+            var listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 
             try
             {
                 listener.Bind(endPoint);
                 listener.Listen(10);
 
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine($"Сервер запущен и слушает порт {port}");
-                Console.WriteLine("Ожидание подключений...");
-                Console.ResetColor();
-
+                Console.WriteLine($"Сервер запущен. Ожидание подключений...\n");
                 while (true)
                 {
-                    Socket clientSocket = listener.Accept();
-                    string clientInfo = clientSocket.RemoteEndPoint.ToString();
-                    Console.WriteLine($"Новое подключение от {clientInfo}");
-
-                    // Обрабатываем клиента в отдельном потоке
-                    Task.Run(() => HandleClient(clientSocket, clientInfo));
+                    var clientSocket = listener.Accept();
+                    Task.Run(() => HandleClient(clientSocket));
                 }
+            }
+            catch (SocketException ex)
+            {
+                Console.WriteLine($"Ошибка сокета: {ex.Message}");
             }
             catch (Exception ex)
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Ошибка сервера: {ex.Message}");
-                Console.ResetColor();
-                Console.ReadKey();
+                Console.WriteLine($"Ошибка запуска сервера: {ex.Message}");
             }
         }
 
-        static async void HandleClient(Socket clientSocket, string clientInfo)
+        static async void HandleClient(Socket clientSocket)
         {
+            string clientInfo = clientSocket.RemoteEndPoint.ToString();
+
             try
             {
-                NetworkStream stream = new NetworkStream(clientSocket);
-                StreamReader reader = new StreamReader(stream, Encoding.UTF8);
-                StreamWriter writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-
-                while (clientSocket.Connected)
+                using (var stream = new NetworkStream(clientSocket))
+                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                using (var writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true })
                 {
-                    try
+                    while (clientSocket.Connected)
                     {
-                        // Читаем команду от клиента
                         string jsonData = await reader.ReadLineAsync();
-
                         if (string.IsNullOrEmpty(jsonData))
-                        {
-                            Console.WriteLine($"Клиент {clientInfo} отключился");
                             break;
-                        }
 
-                        Console.WriteLine($"Получено от {clientInfo}: {jsonData}");
-
-                        // Обработка команды
                         string response = ProcessCommand(jsonData, clientInfo);
-
-                        // Отправка ответа
                         await writer.WriteLineAsync(response);
-                        await writer.FlushAsync();
-                    }
-                    catch (IOException)
-                    {
-                        Console.WriteLine($"Клиент {clientInfo} разорвал соединение");
-                        break;
                     }
                 }
             }
-            catch (Exception ex)
+            catch
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"Ошибка с клиентом {clientInfo}: {ex.Message}");
-                Console.ResetColor();
             }
             finally
             {
@@ -198,89 +133,57 @@ namespace Server
         {
             try
             {
-                ViewModelSend request = JsonConvert.DeserializeObject<ViewModelSend>(jsonData);
-
+                var request = JsonConvert.DeserializeObject<ViewModelSend>(jsonData);
                 if (request == null)
-                {
-                    return JsonConvert.SerializeObject(new ViewModelMessage("error", "Неверный формат запроса"));
-                }
-
-                Console.WriteLine($"Обработка команды: {request.Message}");
+                    return CreateErrorResponse("Неверный формат запроса");
 
                 string[] parts = request.Message.Split(new char[] { ' ' }, 2);
                 string command = parts[0].ToLower();
                 string arguments = parts.Length > 1 ? parts[1] : "";
 
-                switch (command)
+                return command switch
                 {
-                    case "connect":
-                        return HandleConnect(arguments, clientInfo);
-
-                    case "get":
-                        return HandleGet(request.Id, arguments);
-
-                    case "set":
-                        return HandleSet(request.Id, arguments);
-
-                    case "list":
-                        return HandleList(request.Id);
-
-                    default:
-                        return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Неизвестная команда: {command}"));
-                }
+                    "connect" => HandleConnect(arguments, clientInfo, request.Id),
+                    "get" => HandleGet(request.Id, arguments),
+                    "set" => HandleSet(request.Id, arguments),
+                    "list" => HandleList(request.Id, arguments),
+                    _ => CreateErrorResponse($"Неизвестная команда: {command}")
+                };
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ошибка обработки команды: {ex.Message}");
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Ошибка сервера: {ex.Message}"));
+                return CreateErrorResponse($"Ошибка сервера: {ex.Message}");
             }
         }
 
-        static string HandleConnect(string arguments, string clientInfo)
+        static string HandleConnect(string arguments, string clientInfo, int userId)
         {
             string[] credentials = arguments.Split(' ');
             if (credentials.Length != 2)
-            {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", "Неверный формат. Используйте: connect логин пароль"));
-            }
+                return CreateErrorResponse("Неверный формат. Используйте: connect логин пароль");
 
-            string login = credentials[0];
-            string password = credentials[1];
-
-            User user = dbContext.Users.FirstOrDefault(u => u.Login == login && u.Password == password);
+            var user = dbContext.Users.FirstOrDefault(u =>
+                u.Login == credentials[0] && u.Password == credentials[1]);
 
             if (user != null)
             {
-                // Запоминаем текущий путь для пользователя
                 userCurrentPaths[user.Id] = user.Src;
-
-                // Логируем подключение
                 LogCommand(user.Id, $"Подключение с {clientInfo}");
-
-                Console.WriteLine($"Успешная авторизация: {login}");
                 return JsonConvert.SerializeObject(new ViewModelMessage("authorization", user.Id.ToString()));
             }
-            else
-            {
-                Console.WriteLine($"Неудачная попытка входа: {login}");
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", "Неверный логин или пароль"));
-            }
+
+            return CreateErrorResponse("Неверный логин или пароль");
         }
 
         static string HandleGet(int userId, string fileName)
         {
             if (!userCurrentPaths.ContainsKey(userId))
-            {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", "Пользователь не авторизован"));
-            }
+                return CreateErrorResponse("Пользователь не авторизован");
 
-            string currentPath = userCurrentPaths[userId];
-            string filePath = Path.Combine(currentPath, fileName);
+            string filePath = Path.Combine(userCurrentPaths[userId], fileName);
 
             if (!File.Exists(filePath))
-            {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Файл '{fileName}' не найден на сервере"));
-            }
+                return CreateErrorResponse($"Файл '{fileName}' не найден");
 
             try
             {
@@ -288,93 +191,124 @@ namespace Server
                 var fileInfo = new FileInfoFTP(fileBytes, Path.GetFileName(filePath));
 
                 LogCommand(userId, $"get {fileName}");
-                Console.WriteLine($"Файл {fileName} отправлен клиенту");
-
                 return JsonConvert.SerializeObject(new ViewModelMessage("file", JsonConvert.SerializeObject(fileInfo)));
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Ошибка чтения файла: {ex.Message}"));
+                return CreateErrorResponse($"Ошибка чтения файла: {ex.Message}");
             }
         }
 
         static string HandleSet(int userId, string jsonData)
         {
             if (!userCurrentPaths.ContainsKey(userId))
-            {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", "Пользователь не авторизован"));
-            }
+                return CreateErrorResponse("Пользователь не авторизован");
 
             try
             {
                 var fileInfo = JsonConvert.DeserializeObject<FileInfoFTP>(jsonData);
                 if (fileInfo == null)
-                {
-                    return JsonConvert.SerializeObject(new ViewModelMessage("error", "Неверный формат файла"));
-                }
+                    return CreateErrorResponse("Неверный формат файла");
 
-                string currentPath = userCurrentPaths[userId];
-                string filePath = Path.Combine(currentPath, fileInfo.Name);
-
+                string filePath = Path.Combine(userCurrentPaths[userId], fileInfo.Name);
                 File.WriteAllBytes(filePath, fileInfo.Data);
 
                 LogCommand(userId, $"set {fileInfo.Name}");
-                Console.WriteLine($"Файл {fileInfo.Name} получен от клиента");
-
-                return JsonConvert.SerializeObject(new ViewModelMessage("success", $"Файл '{fileInfo.Name}' успешно загружен на сервер"));
+                return CreateSuccessResponse($"Файл '{fileInfo.Name}' успешно загружен");
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Ошибка загрузки файла: {ex.Message}"));
+                return CreateErrorResponse($"Ошибка загрузки файла: {ex.Message}");
             }
         }
 
-        static string HandleList(int userId)
+        static string HandleList(int userId, string path = "")
         {
             if (!userCurrentPaths.ContainsKey(userId))
-            {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", "Пользователь не авторизован"));
-            }
+                return CreateErrorResponse("Пользователь не авторизован");
 
             string currentPath = userCurrentPaths[userId];
 
+            if (!string.IsNullOrEmpty(path) && path != "/")
+                currentPath = Path.Combine(currentPath, path.TrimStart('/'));
+
             try
             {
-                var files = Directory.GetFiles(currentPath);
-                var fileList = new List<string>();
-
-                foreach (var file in files)
-                {
-                    fileList.Add(Path.GetFileName(file));
-                }
-
-                LogCommand(userId, "list");
-                return JsonConvert.SerializeObject(new ViewModelMessage("list", JsonConvert.SerializeObject(fileList)));
+                var items = GetDirectoryStructure(currentPath);
+                LogCommand(userId, $"list {path}");
+                return JsonConvert.SerializeObject(new ViewModelMessage("list", JsonConvert.SerializeObject(items)));
             }
             catch (Exception ex)
             {
-                return JsonConvert.SerializeObject(new ViewModelMessage("error", $"Ошибка чтения директории: {ex.Message}"));
+                return CreateErrorResponse($"Ошибка чтения директории: {ex.Message}");
             }
+        }
+
+        private static List<FileSystemItem> GetDirectoryStructure(string path)
+        {
+            var items = new List<FileSystemItem>();
+
+            foreach (var dir in Directory.GetDirectories(path))
+            {
+                var dirInfo = new DirectoryInfo(dir);
+                items.Add(new FileSystemItem
+                {
+                    Name = dirInfo.Name,
+                    Type = "folder",
+                    Size = "",
+                    LastModified = dirInfo.LastWriteTime
+                });
+            }
+
+            foreach (var file in Directory.GetFiles(path))
+            {
+                var fileInfo = new FileInfo(file);
+                items.Add(new FileSystemItem
+                {
+                    Name = fileInfo.Name,
+                    Type = "file",
+                    Size = FormatFileSize(fileInfo.Length),
+                    LastModified = fileInfo.LastWriteTime
+                });
+            }
+
+            return items;
+        }
+
+        static string FormatFileSize(long bytes)
+        {
+            string[] sizes = { "B", "KB", "MB", "GB" };
+            double len = bytes;
+            int order = 0;
+
+            while (len >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                len = len / 1024;
+            }
+
+            return $"{len:0.##} {sizes[order]}";
         }
 
         static void LogCommand(int userId, string command)
         {
             try
             {
-                var log = new UserLog
+                dbContext.UsersLog.Add(new UserLog
                 {
                     UserId = userId,
                     Command = command,
                     Date = DateTime.Now
-                };
-
-                dbContext.UsersLog.Add(log);
+                });
                 dbContext.SaveChanges();
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Ошибка логирования: {ex.Message}");
-            }
+            catch { }
         }
+
+        private static string CreateErrorResponse(string message) =>
+            JsonConvert.SerializeObject(new ViewModelMessage("error", message));
+
+        private static string CreateSuccessResponse(string message) =>
+            JsonConvert.SerializeObject(new ViewModelMessage("success", message));
     }
 }

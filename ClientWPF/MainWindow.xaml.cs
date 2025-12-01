@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -10,6 +11,7 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace ClientWPF
 {
@@ -22,57 +24,56 @@ namespace ClientWPF
         private int userId = -1;
         private bool isConnected = false;
         private string debugFolder;
+        private ServerItem selectedItem;
+        private ObservableCollection<ServerItem> serverItems;
 
         public MainWindow()
         {
             InitializeComponent();
-
-            // Получаем путь к папке Debug WPF клиента
+            
             debugFolder = AppDomain.CurrentDomain.BaseDirectory;
-            txtLog.Text = $"Папка Debug: {debugFolder}";
+            txtDebugFolder.Text = debugFolder;
+
+            serverItems = new ObservableCollection<ServerItem>();
+            treeServerFiles.ItemsSource = serverItems;
+            treeServerFiles.SelectedItemChanged += TreeServerFiles_SelectedItemChanged;
         }
 
         private async void BtnConnect_Click(object sender, RoutedEventArgs e)
         {
+            if (!IPAddress.TryParse(txtIpAddress.Text, out IPAddress ipAddress) || 
+                !int.TryParse(txtPort.Text, out int port))
+            {
+                MessageBox.Show("Неверный IP адрес или порт");
+                return;
+            }
+
             try
             {
-                if (IPAddress.TryParse(txtIpAddress.Text, out IPAddress ipAddress) &&
-                    int.TryParse(txtPort.Text, out int port))
+                UpdateStatus("Подключение к серверу...", "#FF9800");
+
+                tcpClient = new TcpClient();
+                await tcpClient.ConnectAsync(ipAddress, port);
+
+                if (tcpClient.Connected)
                 {
-                    UpdateLog("Подключение к серверу...");
+                    stream = tcpClient.GetStream();
+                    reader = new StreamReader(stream, Encoding.UTF8);
+                    writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
 
-                    tcpClient = new TcpClient();
-                    await tcpClient.ConnectAsync(ipAddress, port);
+                    isConnected = true;
+                    UpdateStatus("Подключено к серверу", "#4CAF50");
 
-                    if (tcpClient.Connected)
-                    {
-                        stream = tcpClient.GetStream();
-                        reader = new StreamReader(stream, Encoding.UTF8);
-                        writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-
-                        isConnected = true;
-                        UpdateStatus("Подключено");
-                        UpdateLog($"Подключено к {ipAddress}:{port}");
-
-                        btnConnect.IsEnabled = false;
-                        btnLogin.IsEnabled = true;
-                        txtIpAddress.IsEnabled = false;
-                        txtPort.IsEnabled = false;
-                    }
-                    else
-                    {
-                        UpdateLog("Не удалось подключиться к серверу");
-                        MessageBox.Show("Не удалось подключиться к серверу");
-                    }
+                    UpdateConnectionUI(true);
                 }
                 else
                 {
-                    MessageBox.Show("Неверный IP адрес или порт");
+                    UpdateStatus("Не удалось подключиться", "#F44336");
                 }
             }
             catch (Exception ex)
             {
-                UpdateLog($"Ошибка подключения: {ex.Message}");
+                UpdateStatus($"Ошибка подключения: {ex.Message}", "#F44336");
                 MessageBox.Show($"Ошибка подключения: {ex.Message}");
             }
         }
@@ -85,187 +86,207 @@ namespace ClientWPF
                 return;
             }
 
+            string login = txtLogin.Text.Trim();
+            string password = txtPassword.Password;
+
+            if (string.IsNullOrEmpty(login) || string.IsNullOrEmpty(password))
+            {
+                MessageBox.Show("Введите логин и пароль");
+                return;
+            }
+
             try
             {
-                string login = txtLogin.Text.Trim();
-                string password = txtPassword.Password;
+                UpdateStatus("Авторизация...", "#FF9800");
 
-                if (string.IsNullOrEmpty(login) || string.IsNullOrEmpty(password))
+                string response = await SendCommand($"connect {login} {password}");
+                var viewModelResponse = JsonConvert.DeserializeObject<ViewModelMessage>(response);
+
+                if (viewModelResponse.Command == "authorization")
                 {
-                    MessageBox.Show("Введите логин и пароль");
-                    return;
-                }
+                    userId = int.Parse(viewModelResponse.Data);
+                    UpdateStatus($"Авторизован как {login}", "#4CAF50");
 
-                UpdateLog("Авторизация...");
+                    UpdateLoginUI(true);
+                    UpdateFileOperationsUI(true);
 
-                string message = $"connect {login} {password}";
-                var viewModel = new ViewModelSend(message, -1);
-                string json = JsonConvert.SerializeObject(viewModel);
-
-                // Отправляем запрос
-                await writer.WriteLineAsync(json);
-                await writer.FlushAsync();
-
-                // Получаем ответ
-                string responseJson = await reader.ReadLineAsync();
-
-                var response = JsonConvert.DeserializeObject<ViewModelMessage>(responseJson);
-
-                if (response.Command == "authorization")
-                {
-                    userId = int.Parse(response.Data);
-                    UpdateStatus($"Авторизован как {login}");
-                    UpdateLog($"Успешная авторизация: {login}");
-
-                    btnLogin.IsEnabled = false;
-                    txtLogin.IsEnabled = false;
-                    txtPassword.IsEnabled = false;
-
-                    // Активируем кнопки управления
-                    btnGetFile.IsEnabled = true;
-                    btnSetFile.IsEnabled = true;
-                    btnRefreshList.IsEnabled = true;
-                    cmbServerFiles.IsEnabled = true;
-
-                    // Загружаем список файлов с сервера
-                    await LoadServerFilesList();
+                    await LoadServerStructure();
                 }
                 else
                 {
-                    UpdateLog($"Ошибка авторизации: {response.Data}");
-                    MessageBox.Show(response.Data);
+                    UpdateStatus($"Ошибка авторизации: {viewModelResponse.Data}", "#F44336");
+                    MessageBox.Show(viewModelResponse.Data);
                 }
             }
             catch (Exception ex)
             {
-                UpdateLog($"Ошибка авторизации: {ex.Message}");
+                UpdateStatus($"Ошибка авторизации: {ex.Message}", "#F44336");
                 MessageBox.Show($"Ошибка авторизации: {ex.Message}");
             }
         }
 
-        private async Task LoadServerFilesList()
+        private async Task LoadServerStructure()
         {
             if (!isConnected || userId == -1) return;
 
             try
             {
-                UpdateLog("Загрузка списка файлов с сервера...");
+                UpdateStatus("Загрузка структуры файлов...", "#FF9800");
 
-                var viewModel = new ViewModelSend("list", userId);
-                string json = JsonConvert.SerializeObject(viewModel);
+                Dispatcher.Invoke(() => serverItems.Clear());
 
-                // Отправляем запрос
-                await writer.WriteLineAsync(json);
-                await writer.FlushAsync();
-
-                // Получаем ответ
-                string responseJson = await reader.ReadLineAsync();
-
-                var response = JsonConvert.DeserializeObject<ViewModelMessage>(responseJson);
-
-                if (response.Command == "list")
+                var rootItem = new ServerItem
                 {
-                    var files = JsonConvert.DeserializeObject<List<string>>(response.Data);
-                    UpdateComboBox(files);
-                    UpdateLog($"Загружено {files.Count} файлов с сервера");
-                }
-                else
+                    Name = "Корневая папка",
+                    FullPath = "",
+                    IsDirectory = true,
+                    HasChildren = true
+                };
+
+                await LoadDirectoryContent(rootItem);
+
+                Dispatcher.Invoke(() =>
                 {
-                    UpdateLog($"Ошибка: {response.Data}");
-                    MessageBox.Show(response.Data);
+                    serverItems.Add(rootItem);
+                    txtCurrentPath.Text = "/ (корневая папка)";
+                });
+
+                UpdateStatus("Структура файлов загружена", "#4CAF50");
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus($"Ошибка загрузки структуры: {ex.Message}", "#F44336");
+                MessageBox.Show($"Ошибка загрузки структуры файлов: {ex.Message}");
+            }
+        }
+
+        private async Task LoadDirectoryContent(ServerItem parentItem)
+        {
+            try
+            {
+                string response = await SendCommand($"list {parentItem.FullPath}");
+                var viewModelResponse = JsonConvert.DeserializeObject<ViewModelMessage>(response);
+
+                if (viewModelResponse.Command == "list")
+                {
+                    var items = JsonConvert.DeserializeObject<List<FileSystemItem>>(viewModelResponse.Data);
+
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        parentItem.Children.Clear();
+
+                        if (items != null)
+                        {
+                            AddFoldersToTree(parentItem, items);
+                            AddFilesToTree(parentItem, items);
+                            parentItem.HasChildren = parentItem.Children.Count > 0;
+                        }
+                    });
                 }
             }
             catch (Exception ex)
             {
-                UpdateLog($"Ошибка загрузки списка: {ex.Message}");
-                MessageBox.Show($"Ошибка загрузки списка файлов: {ex.Message}");
+                Console.WriteLine($"Ошибка загрузки директории: {ex.Message}");
             }
         }
 
-        private void UpdateComboBox(List<string> files)
+        private void AddFoldersToTree(ServerItem parent, List<FileSystemItem> items)
+        {
+            foreach (var item in items.Where(i => i.Type == "folder"))
+            {
+                parent.Children.Add(new ServerItem
+                {
+                    Name = item.Name,
+                    FullPath = Path.Combine(parent.FullPath, item.Name).Replace("\\", "/"),
+                    IsDirectory = true,
+                    Size = "",
+                    HasChildren = true
+                });
+            }
+        }
+
+        private void AddFilesToTree(ServerItem parent, List<FileSystemItem> items)
+        {
+            foreach (var item in items.Where(i => i.Type == "file"))
+            {
+                parent.Children.Add(new ServerItem
+                {
+                    Name = item.Name,
+                    FullPath = Path.Combine(parent.FullPath, item.Name).Replace("\\", "/"),
+                    IsDirectory = false,
+                    Size = item.Size,
+                    HasChildren = false
+                });
+            }
+        }
+
+        private async void TreeServerFiles_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
+        {
+            selectedItem = e.NewValue as ServerItem;
+
+            if (selectedItem != null)
+            {
+                UpdateSelectedItemInfo(selectedItem);
+
+                if (selectedItem.IsDirectory && selectedItem.Children.Count == 0 && selectedItem.HasChildren)
+                {
+                    await LoadDirectoryContent(selectedItem);
+                    selectedItem.IsExpanded = true;
+                }
+            }
+        }
+
+        private void UpdateSelectedItemInfo(ServerItem item)
         {
             Dispatcher.Invoke(() =>
             {
-                cmbServerFiles.Items.Clear();
-                if (files != null && files.Any())
-                {
-                    foreach (var file in files)
-                    {
-                        cmbServerFiles.Items.Add(file);
-                    }
-                    cmbServerFiles.SelectedIndex = 0;
-                }
-                else
-                {
-                    cmbServerFiles.Items.Add("Нет файлов на сервере");
-                }
+                txtSelectedItem.Text = item.IsDirectory ? 
+                    $"{item.Name} (папка)" : 
+                    $"{item.Name} ({item.Size})";
+                    
+                txtPathInfo.Text = $"Путь: {item.FullPath}";
+                btnGetFile.IsEnabled = !item.IsDirectory;
             });
         }
 
         private async void BtnGetFile_Click(object sender, RoutedEventArgs e)
         {
-            if (!isConnected || userId == -1)
+            if (selectedItem == null || selectedItem.IsDirectory)
             {
-                MessageBox.Show("Сначала авторизуйтесь");
+                MessageBox.Show("Выберите файл для скачивания", "Внимание", 
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-
-            if (cmbServerFiles.SelectedItem == null ||
-                cmbServerFiles.SelectedItem.ToString() == "Нет файлов на сервере")
-            {
-                MessageBox.Show("Выберите файл из списка");
-                return;
-            }
-
-            string fileName = cmbServerFiles.SelectedItem.ToString();
 
             try
             {
-                UpdateLog($"Запрос файла '{fileName}' с сервера...");
+                UpdateStatus($"Скачивание файла '{selectedItem.Name}'...", "#FF9800");
 
-                // Отправляем команду GET
-                var viewModel = new ViewModelSend($"get {fileName}", userId);
-                string json = JsonConvert.SerializeObject(viewModel);
+                string response = await SendCommand($"get {selectedItem.FullPath}");
+                var viewModelResponse = JsonConvert.DeserializeObject<ViewModelMessage>(response);
 
-                await writer.WriteLineAsync(json);
-                await writer.FlushAsync();
-
-                // Получаем ответ
-                string responseJson = await reader.ReadLineAsync();
-
-                var response = JsonConvert.DeserializeObject<ViewModelMessage>(responseJson);
-
-                if (response.Command == "file")
+                if (viewModelResponse.Command == "file")
                 {
-                    var fileInfo = JsonConvert.DeserializeObject<FileInfoFTP>(response.Data);
-
-                    // Сохраняем файл в папку Debug WPF клиента
-                    string localFilePath = Path.Combine(debugFolder, fileInfo.Name);
-
-                    // Если файл уже существует, добавляем timestamp
-                    if (File.Exists(localFilePath))
-                    {
-                        string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                        string nameWithoutExt = Path.GetFileNameWithoutExtension(fileInfo.Name);
-                        string extension = Path.GetExtension(fileInfo.Name);
-                        localFilePath = Path.Combine(debugFolder, $"{nameWithoutExt}_{timestamp}{extension}");
-                    }
+                    var fileInfo = JsonConvert.DeserializeObject<FileInfoFTP>(viewModelResponse.Data);
+                    string localFilePath = GetUniqueFilePath(fileInfo.Name);
 
                     File.WriteAllBytes(localFilePath, fileInfo.Data);
-
-                    UpdateLog($"Файл '{fileInfo.Name}' сохранен в: {localFilePath}");
-                    MessageBox.Show($"Файл '{fileInfo.Name}' успешно скачан!\nПуть: {localFilePath}");
+                    
+                    UpdateStatus($"Файл '{fileInfo.Name}' успешно скачан", "#4CAF50");
+                    ShowDownloadSuccess(fileInfo.Name, localFilePath);
                 }
                 else
                 {
-                    UpdateLog($"Ошибка: {response.Data}");
-                    MessageBox.Show(response.Data);
+                    UpdateStatus($"Ошибка: {viewModelResponse.Data}", "#F44336");
+                    MessageBox.Show(viewModelResponse.Data, "Ошибка", 
+                        MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
             catch (Exception ex)
             {
-                UpdateLog($"Ошибка при скачивании файла: {ex.Message}");
-                MessageBox.Show($"Ошибка при скачивании файла: {ex.Message}");
+                UpdateStatus($"Ошибка при скачивании: {ex.Message}", "#F44336");
+                MessageBox.Show($"Ошибка при скачивании: {ex.Message}", "Ошибка",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -273,78 +294,136 @@ namespace ClientWPF
         {
             if (!isConnected || userId == -1)
             {
-                MessageBox.Show("Сначала авторизуйтесь");
+                MessageBox.Show("Сначала авторизуйтесь", "Внимание",
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
+            var openDialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Выберите файл для загрузки",
+                Filter = "Все файлы (*.*)|*.*",
+                Multiselect = false
+            };
+
+            if (openDialog.ShowDialog() != true) return;
+
             try
             {
-                // Открываем диалог выбора файла
-                var openDialog = new Microsoft.Win32.OpenFileDialog
+                UpdateStatus($"Загрузка файла '{Path.GetFileName(openDialog.FileName)}'...", "#FF9800");
+
+                byte[] fileBytes = File.ReadAllBytes(openDialog.FileName);
+                var fileInfo = new FileInfoFTP(fileBytes, Path.GetFileName(openDialog.FileName));
+                
+                string response = await SendCommand($"set {JsonConvert.SerializeObject(fileInfo)}");
+                var viewModelResponse = JsonConvert.DeserializeObject<ViewModelMessage>(response);
+
+                if (viewModelResponse.Command == "success")
                 {
-                    Title = "Выберите файл для загрузки на сервер",
-                    Filter = "Все файлы (*.*)|*.*",
-                    Multiselect = false
-                };
+                    UpdateStatus(viewModelResponse.Data, "#4CAF50");
+                    MessageBox.Show(viewModelResponse.Data, "Успех",
+                        MessageBoxButton.OK, MessageBoxImage.Information);
 
-                if (openDialog.ShowDialog() == true)
+                    await LoadServerStructure();
+                }
+                else
                 {
-                    UpdateLog($"Подготовка файла '{Path.GetFileName(openDialog.FileName)}'...");
-
-                    // Читаем файл с диска
-                    byte[] fileBytes = File.ReadAllBytes(openDialog.FileName);
-                    string fileName = Path.GetFileName(openDialog.FileName);
-
-                    // Создаем объект файла
-                    var fileInfo = new FileInfoFTP(fileBytes, fileName);
-                    string fileInfoJson = JsonConvert.SerializeObject(fileInfo);
-
-                    // Отправляем команду SET
-                    UpdateLog($"Отправка файла '{fileName}' на сервер...");
-
-                    var viewModel = new ViewModelSend($"set {fileInfoJson}", userId);
-                    string json = JsonConvert.SerializeObject(viewModel);
-
-                    await writer.WriteLineAsync(json);
-                    await writer.FlushAsync();
-
-                    // Получаем ответ
-                    string responseJson = await reader.ReadLineAsync();
-
-                    var response = JsonConvert.DeserializeObject<ViewModelMessage>(responseJson);
-
-                    UpdateLog(response.Data);
-                    MessageBox.Show(response.Data);
-
-                    // Обновляем список файлов
-                    await LoadServerFilesList();
+                    UpdateStatus($"Ошибка: {viewModelResponse.Data}", "#F44336");
+                    MessageBox.Show(viewModelResponse.Data, "Ошибка",
+                        MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
             catch (Exception ex)
             {
-                UpdateLog($"Ошибка при загрузке файла: {ex.Message}");
-                MessageBox.Show($"Ошибка при загрузке файла: {ex.Message}");
+                UpdateStatus($"Ошибка при загрузке: {ex.Message}", "#F44336");
+                MessageBox.Show($"Ошибка при загрузке: {ex.Message}", "Ошибка",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
-        private async void BtnRefreshList_Click(object sender, RoutedEventArgs e)
+        private async void BtnRefresh_Click(object sender, RoutedEventArgs e)
         {
-            await LoadServerFilesList();
+            await LoadServerStructure();
         }
 
-        private void UpdateStatus(string message)
+        private async Task<string> SendCommand(string message)
+        {
+            var viewModel = new ViewModelSend(message, userId);
+            string json = JsonConvert.SerializeObject(viewModel);
+
+            await writer.WriteLineAsync(json);
+            await writer.FlushAsync();
+
+            return await reader.ReadLineAsync();
+        }
+
+        private string GetUniqueFilePath(string fileName)
+        {
+            string localFilePath = Path.Combine(debugFolder, fileName);
+
+            if (File.Exists(localFilePath))
+            {
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
+                string extension = Path.GetExtension(fileName);
+                localFilePath = Path.Combine(debugFolder, $"{nameWithoutExt}_{timestamp}{extension}");
+            }
+
+            return localFilePath;
+        }
+
+        private void ShowDownloadSuccess(string fileName, string filePath)
+        {
+            var result = MessageBox.Show(
+                $"Файл '{fileName}' успешно скачан!\n\nПуть: {filePath}\n\nОткрыть папку с файлом?",
+                "Файл скачан",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information);
+
+            if (result == MessageBoxResult.Yes)
+            {
+                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{filePath}\"");
+            }
+        }
+
+        private void UpdateStatus(string message, string color = "#2196F3")
         {
             Dispatcher.Invoke(() =>
             {
-                txtStatus.Text = $"Статус: {message}";
+                txtStatus.Text = message;
+                statusIndicator.Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
             });
         }
 
-        private void UpdateLog(string message)
+        private void UpdateConnectionUI(bool isConnected)
         {
             Dispatcher.Invoke(() =>
             {
-                txtLog.Text = message;
+                btnConnect.IsEnabled = !isConnected;
+                btnLogin.IsEnabled = isConnected;
+                txtIpAddress.IsEnabled = !isConnected;
+                txtPort.IsEnabled = !isConnected;
+                statusIndicator.Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(isConnected ? "#4CAF50" : "#F44336"));
+            });
+        }
+
+        private void UpdateLoginUI(bool isLoggedIn)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                btnLogin.IsEnabled = !isLoggedIn;
+                txtLogin.IsEnabled = !isLoggedIn;
+                txtPassword.IsEnabled = !isLoggedIn;
+            });
+        }
+
+        private void UpdateFileOperationsUI(bool enable)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                btnGetFile.IsEnabled = enable;
+                btnSetFile.IsEnabled = enable;
+                btnRefresh.IsEnabled = enable;
             });
         }
 
@@ -354,7 +433,7 @@ namespace ClientWPF
 
             try
             {
-                if (tcpClient != null && tcpClient.Connected)
+                if (tcpClient?.Connected == true)
                 {
                     writer?.Close();
                     reader?.Close();
