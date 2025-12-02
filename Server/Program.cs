@@ -206,14 +206,44 @@ namespace Server
 
             try
             {
-                var fileInfo = JsonConvert.DeserializeObject<FileInfoFTP>(jsonData);
+                // Разделяем данные: сначала путь, потом файл
+                string[] parts = jsonData.Split(new string[] { "|||" }, 2, StringSplitOptions.None);
+                if (parts.Length != 2)
+                    return CreateErrorResponse("Неверный формат данных");
+
+                string targetPath = parts[0];
+                string fileJson = parts[1];
+
+                var fileInfo = JsonConvert.DeserializeObject<FileInfoFTP>(fileJson);
                 if (fileInfo == null)
                     return CreateErrorResponse("Неверный формат файла");
 
-                string filePath = Path.Combine(userCurrentPaths[userId], fileInfo.Name);
-                File.WriteAllBytes(filePath, fileInfo.Data);
+                // Базовый путь пользователя
+                string basePath = userCurrentPaths[userId];
 
-                LogCommand(userId, $"set {fileInfo.Name}");
+                // Формируем полный путь
+                string fullPath;
+                if (string.IsNullOrEmpty(targetPath))
+                {
+                    // Корневая папка
+                    fullPath = Path.Combine(basePath, fileInfo.Name);
+                }
+                else
+                {
+                    // Папка внутри пользовательской директории
+                    fullPath = Path.Combine(basePath, targetPath.TrimStart('/'), fileInfo.Name);
+
+                    // Создаем папки, если их нет
+                    string directory = Path.GetDirectoryName(fullPath);
+                    if (!Directory.Exists(directory))
+                    {
+                        Directory.CreateDirectory(directory);
+                    }
+                }
+
+                File.WriteAllBytes(fullPath, fileInfo.Data);
+
+                LogCommand(userId, $"set {targetPath}/{fileInfo.Name}");
                 return CreateSuccessResponse($"Файл '{fileInfo.Name}' успешно загружен");
             }
             catch (Exception ex)

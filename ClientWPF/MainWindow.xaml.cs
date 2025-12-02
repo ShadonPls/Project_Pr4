@@ -26,6 +26,8 @@ namespace ClientWPF
         private string debugFolder;
         private ServerItem selectedItem;
         private ObservableCollection<ServerItem> serverItems;
+        private string currentServerPath = "";
+        private string currentFolderPath = "";
 
         public MainWindow()
         {
@@ -228,12 +230,50 @@ namespace ClientWPF
             {
                 UpdateSelectedItemInfo(selectedItem);
 
+                // Обновляем текущий путь ТОЛЬКО если это папка
+                if (selectedItem.IsDirectory)
+                {
+                    currentFolderPath = selectedItem.FullPath;
+                    UpdateCurrentPathDisplay();
+                }
+                else
+                {
+                    // Если выбран файл, показываем путь к его родительской папке
+                    currentFolderPath = GetParentPath(selectedItem.FullPath);
+                    UpdateCurrentPathDisplay();
+                }
+
                 if (selectedItem.IsDirectory && selectedItem.Children.Count == 0 && selectedItem.HasChildren)
                 {
                     await LoadDirectoryContent(selectedItem);
                     selectedItem.IsExpanded = true;
                 }
             }
+        }
+
+        private string GetParentPath(string fullPath)
+        {
+            int lastSlash = fullPath.LastIndexOf('/');
+            if (lastSlash > 0)
+            {
+                return fullPath.Substring(0, lastSlash);
+            }
+            return ""; // Корневая папка
+        }
+
+        private void UpdateCurrentPathDisplay()
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (string.IsNullOrEmpty(currentFolderPath))
+                {
+                    txtCurrentPath.Text = "/ (корневая папка)";
+                }
+                else
+                {
+                    txtCurrentPath.Text = currentFolderPath;
+                }
+            });
         }
 
         private void UpdateSelectedItemInfo(ServerItem item)
@@ -310,20 +350,28 @@ namespace ClientWPF
 
             try
             {
-                UpdateStatus($"Загрузка файла '{Path.GetFileName(openDialog.FileName)}'...", "#FF9800");
+                string fileName = Path.GetFileName(openDialog.FileName);
+                UpdateStatus($"Загрузка файла '{fileName}'...", "#FF9800");
 
                 byte[] fileBytes = File.ReadAllBytes(openDialog.FileName);
-                var fileInfo = new FileInfoFTP(fileBytes, Path.GetFileName(openDialog.FileName));
-                
-                string response = await SendCommand($"set {JsonConvert.SerializeObject(fileInfo)}");
+                var fileInfo = new FileInfoFTP(fileBytes, fileName);
+
+                // Сериализуем файл
+                string fileJson = JsonConvert.SerializeObject(fileInfo);
+
+                // Формируем команду: путь|||файл
+                string command = $"set {currentFolderPath}|||{fileJson}";
+
+                string response = await SendCommand(command);
                 var viewModelResponse = JsonConvert.DeserializeObject<ViewModelMessage>(response);
 
                 if (viewModelResponse.Command == "success")
                 {
                     UpdateStatus(viewModelResponse.Data, "#4CAF50");
-                    MessageBox.Show(viewModelResponse.Data, "Успех",
+                    MessageBox.Show($"Файл '{fileName}' успешно загружен в папку: {currentFolderPath}", "Успех",
                         MessageBoxButton.OK, MessageBoxImage.Information);
 
+                    // Обновляем структуру сервера
                     await LoadServerStructure();
                 }
                 else
@@ -414,6 +462,12 @@ namespace ClientWPF
                 btnLogin.IsEnabled = !isLoggedIn;
                 txtLogin.IsEnabled = !isLoggedIn;
                 txtPassword.IsEnabled = !isLoggedIn;
+
+                if (!isLoggedIn)
+                {
+                    currentServerPath = "";
+                    UpdateCurrentPathDisplay();
+                }
             });
         }
 
